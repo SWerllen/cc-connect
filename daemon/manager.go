@@ -21,13 +21,13 @@ const (
 )
 
 type Config struct {
-	BinaryPath        string
-	WorkDir           string
-	LogFile           string
-	LogMaxSize        int64
-	LogMaxBackups     int
-	EnvPATH           string            // capture user's PATH so agents are accessible
-	EnvExtra          map[string]string // selected environment variables needed by the service runtime
+	BinaryPath    string
+	WorkDir       string
+	LogFile       string
+	LogMaxSize    int64
+	LogMaxBackups int
+	EnvPATH       string            // capture user's PATH so agents are accessible
+	EnvExtra      map[string]string // selected environment variables needed by the service runtime
 	// NoCaptureSecrets, when true, restricts the install-time env capture
 	// to proxy-related variables only and skips both the config.toml ${ENV}
 	// placeholder scan and any extension discoverers registered via
@@ -74,12 +74,12 @@ func DefaultDataDir() string {
 // etc. can locate the log file without parsing service definitions.
 
 type Meta struct {
-	LogFile      string `json:"log_file"`
-	LogMaxSize   int64  `json:"log_max_size"`
-	LogMaxBackups int   `json:"log_max_backups"`
-	WorkDir      string `json:"work_dir"`
-	BinaryPath   string `json:"binary_path"`
-	InstalledAt  string `json:"installed_at"`
+	LogFile       string `json:"log_file"`
+	LogMaxSize    int64  `json:"log_max_size"`
+	LogMaxBackups int    `json:"log_max_backups"`
+	WorkDir       string `json:"work_dir"`
+	BinaryPath    string `json:"binary_path"`
+	InstalledAt   string `json:"installed_at"`
 }
 
 func metaPath() string {
@@ -115,6 +115,20 @@ func RemoveMeta() {
 
 func NowISO() string {
 	return time.Now().Format(time.RFC3339)
+}
+
+// MetaFromConfig builds the persisted daemon metadata from the resolved
+// installation configuration. Keep this conversion centralized so service
+// settings do not silently disappear from daemon.json.
+func MetaFromConfig(cfg Config) *Meta {
+	return &Meta{
+		LogFile:       cfg.LogFile,
+		LogMaxSize:    cfg.LogMaxSize,
+		LogMaxBackups: cfg.LogMaxBackups,
+		WorkDir:       cfg.WorkDir,
+		BinaryPath:    cfg.BinaryPath,
+		InstalledAt:   NowISO(),
+	}
 }
 
 func Resolve(cfg *Config) error {
