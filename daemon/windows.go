@@ -225,11 +225,40 @@ func powerShellLiteral(value string) string {
 }
 
 func stopWindowsTask() error {
-	out, err := runPowerShell(fmt.Sprintf(`
+	out, err := runPowerShell(buildStopWindowsTaskScript(windowsTaskScriptPath()))
+	if err != nil {
+		return fmt.Errorf("stop scheduled task: %s (%w)", out, err)
+	}
+	return nil
+}
+
+func buildStopWindowsTaskScript(scriptPath string) string {
+	return fmt.Sprintf(`
 $task = Get-ScheduledTask -TaskName %s -ErrorAction SilentlyContinue
 if ($null -eq $task) { exit 0 }
+$daemonScript = %s
+$expectedFragment = '-File "' + $daemonScript + '"'
+$allProcesses = @(Get-CimInstance Win32_Process)
+$rootIds = @($allProcesses | Where-Object {
+	$_.Name -ieq 'powershell.exe' -and
+	$null -ne $_.CommandLine -and
+	$_.CommandLine.IndexOf($expectedFragment, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+} | ForEach-Object { [int]$_.ProcessId })
+$descendantIds = @()
+$frontier = @($rootIds)
+while ($frontier.Count -gt 0) {
+	$children = @($allProcesses | Where-Object { $frontier -contains [int]$_.ParentProcessId })
+	if ($children.Count -eq 0) { break }
+	$childIds = @($children | ForEach-Object { [int]$_.ProcessId })
+	$descendantIds += $childIds
+	$frontier = $childIds
+}
 if ($task.State -eq 'Running') {
 	Stop-ScheduledTask -TaskName %s
+}
+Start-Sleep -Milliseconds 500
+foreach ($childPid in ($descendantIds | Select-Object -Unique)) {
+	Stop-Process -Id $childPid -Force -ErrorAction SilentlyContinue
 }
 for ($i = 0; $i -lt 20; $i++) {
 	$task = Get-ScheduledTask -TaskName %s -ErrorAction SilentlyContinue
@@ -238,11 +267,7 @@ for ($i = 0; $i -lt 20; $i++) {
 }
 Write-Error 'scheduled task did not stop within timeout'
 exit 1
-`, powerShellLiteral(windowsTaskName), powerShellLiteral(windowsTaskName), powerShellLiteral(windowsTaskName)))
-	if err != nil {
-		return fmt.Errorf("stop scheduled task: %s (%w)", out, err)
-	}
-	return nil
+`, powerShellLiteral(windowsTaskName), powerShellLiteral(scriptPath), powerShellLiteral(windowsTaskName), powerShellLiteral(windowsTaskName))
 }
 
 func startWindowsTask() error {

@@ -110,6 +110,7 @@ type Config struct {
 	Webhook            WebhookConfig           `toml:"webhook"`
 	Bridge             BridgeConfig            `toml:"bridge"`
 	Management         ManagementConfig        `toml:"management"`
+	OpenAIGateway      OpenAIGatewayConfig     `toml:"openai_gateway"`
 	Hooks              []HookConfig            `toml:"hooks"`
 	IdleTimeoutMins    *int                    `toml:"idle_timeout_mins,omitempty"`  // max minutes between consecutive agent events; 0 = no timeout; default 120
 	MaxTurnTimeMins    *int                    `toml:"max_turn_time_mins,omitempty"` // absolute wall-clock cap per turn in minutes; 0 = disabled (default)
@@ -181,6 +182,22 @@ type ManagementConfig struct {
 	Port        int      `toml:"port,omitempty"`         // listen port; default 9820
 	Token       string   `toml:"token,omitempty"`        // shared secret for authentication; required
 	CORSOrigins []string `toml:"cors_origins,omitempty"` // allowed CORS origins; empty = no CORS
+}
+
+// OpenAIGatewayConfig controls the text-only OpenAI Chat Completions gateway.
+// Models maps public model IDs to cc-connect project names. With an empty map,
+// project names are exposed directly as model IDs.
+type OpenAIGatewayConfig struct {
+	Enabled                *bool             `toml:"enabled"`                             // default false
+	Listen                 string            `toml:"listen,omitempty"`                    // default 127.0.0.1:9840
+	Token                  string            `toml:"token,omitempty"`                     // Bearer token; required for non-loopback listeners
+	TimeoutSecs            int               `toml:"timeout_secs,omitempty"`              // per-request timeout; default 600
+	AccessLog              *bool             `toml:"access_log,omitempty"`                // structured request metadata; default false
+	TextOnly               *bool             `toml:"text_only,omitempty"`                 // expose only agents that enforce zero-tool sessions; default false
+	PersistentSessions     *bool             `toml:"persistent_sessions,omitempty"`       // opt-in cc_session support; default false
+	SessionIdleTimeoutSecs int               `toml:"session_idle_timeout_secs,omitempty"` // default 900
+	MaxPersistentSessions  int               `toml:"max_persistent_sessions,omitempty"`   // default 16
+	Models                 map[string]string `toml:"models,omitempty"`                    // public model ID -> project name
 }
 
 // Display mode constants.
@@ -1015,6 +1032,15 @@ func (c *Config) validateInternal(permissive bool) error {
 	if c.Relay.TimeoutSecs != nil && *c.Relay.TimeoutSecs < 0 {
 		return fmt.Errorf("config: relay.timeout_secs must be >= 0")
 	}
+	if c.OpenAIGateway.TimeoutSecs < 0 {
+		return fmt.Errorf("config: openai_gateway.timeout_secs must be >= 0")
+	}
+	if c.OpenAIGateway.SessionIdleTimeoutSecs < 0 {
+		return fmt.Errorf("config: openai_gateway.session_idle_timeout_secs must be >= 0")
+	}
+	if c.OpenAIGateway.MaxPersistentSessions < 0 {
+		return fmt.Errorf("config: openai_gateway.max_persistent_sessions must be >= 0")
+	}
 	switch strings.ToLower(strings.TrimSpace(c.Relay.Visibility)) {
 	case "", "full", "summary", "none":
 	default:
@@ -1031,7 +1057,7 @@ func (c *Config) validateInternal(permissive bool) error {
 		if proj.Agent.Type == "" {
 			return fmt.Errorf("config: %s.agent.type is required", prefix)
 		}
-		if len(proj.Platforms) == 0 && !permissive {
+		if len(proj.Platforms) == 0 && !permissive && !c.openAIGatewayExposesProject(proj.Name) {
 			return fmt.Errorf("config: %s needs at least one [[projects.platforms]]", prefix)
 		}
 		for j, p := range proj.Platforms {
@@ -1070,6 +1096,24 @@ func (c *Config) validateInternal(permissive bool) error {
 		}
 	}
 	return nil
+}
+
+// openAIGatewayExposesProject reports whether the project has a non-platform
+// ingress through the OpenAI-compatible gateway. This lets API-only projects
+// avoid creating a duplicate IM connection solely to satisfy validation.
+func (c *Config) openAIGatewayExposesProject(projectName string) bool {
+	if c.OpenAIGateway.Enabled == nil || !*c.OpenAIGateway.Enabled {
+		return false
+	}
+	if len(c.OpenAIGateway.Models) == 0 {
+		return true
+	}
+	for _, targetProject := range c.OpenAIGateway.Models {
+		if targetProject == projectName {
+			return true
+		}
+	}
+	return false
 }
 
 func validateDisplayConfig(prefix string, display *DisplayConfig) error {

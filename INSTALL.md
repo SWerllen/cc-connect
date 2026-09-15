@@ -815,6 +815,7 @@ cc-connect daemon uninstall
 The following additional features are available:
 
 - **Codex Agent**: OpenAI Codex CLI integration (`codex exec --json`)
+- **OpenAI-compatible Gateway**: expose cc-connect projects through text-only `/v1/models` and `/v1/chat/completions`, with per-request Codex or Qoder model and reasoning-effort selection (see `docs/openai-gateway.md`)
 - **Cursor Agent**: Cursor Agent CLI integration (`agent --print --output-format stream-json`)
 - **Gemini CLI**: Google Gemini CLI integration (`gemini -p --output-format stream-json`)
 - **Qoder CLI**: Qoder CLI integration (`qodercli -p -f stream-json`)

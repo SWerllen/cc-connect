@@ -45,6 +45,47 @@ func TestAvailableReasoningEfforts_IncludesMax(t *testing.T) {
 	}
 }
 
+func TestStartSessionWithOptionsDoesNotMutateAgentDefaults(t *testing.T) {
+	agent := &Agent{
+		workDir:         "/tmp/project",
+		model:           "gpt-default",
+		reasoningEffort: "medium",
+		mode:            "full-auto",
+		backend:         "exec",
+		cmd:             "codex",
+		activeIdx:       -1,
+	}
+	session, err := agent.StartSessionWithOptions(context.Background(), "", core.AgentSessionOptions{
+		Model:           "gpt-request",
+		ReasoningEffort: "xhigh",
+	})
+	if err != nil {
+		t.Fatalf("StartSessionWithOptions: %v", err)
+	}
+	defer session.Close()
+	cs, ok := session.(*codexSession)
+	if !ok {
+		t.Fatalf("session type = %T", session)
+	}
+	if cs.model != "gpt-request" || cs.effort != "xhigh" {
+		t.Fatalf("session model/effort = %q/%q", cs.model, cs.effort)
+	}
+	if agent.GetModel() != "gpt-default" || agent.GetReasoningEffort() != "medium" {
+		t.Fatalf("agent defaults changed to %q/%q", agent.GetModel(), agent.GetReasoningEffort())
+	}
+}
+
+func TestResolveSessionBackendPersistentUsesLocalAppServer(t *testing.T) {
+	backend, url := resolveSessionBackend("exec", "ws://127.0.0.1:3845", true)
+	if backend != "app_server" || url != "stdio://" {
+		t.Fatalf("persistent backend = %q %q, want app_server stdio://", backend, url)
+	}
+	backend, url = resolveSessionBackend("exec", "ws://127.0.0.1:3845", false)
+	if backend != "exec" || url != "ws://127.0.0.1:3845" {
+		t.Fatalf("ordinary backend changed to %q %q", backend, url)
+	}
+}
+
 func TestBuildExecArgs_IncludesReasoningEffort(t *testing.T) {
 	cs, err := newCodexSession(context.Background(), "codex", nil, "/tmp/project", "o3", "high", "full-auto", "", "", nil, "", "", "")
 	if err != nil {

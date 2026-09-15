@@ -1255,6 +1255,35 @@ func main() {
 		mgmtSrv.Start()
 	}
 
+	// Start the text-only OpenAI Chat Completions gateway if enabled.
+	var openAIGateway *core.OpenAIGateway
+	if cfg.OpenAIGateway.Enabled != nil && *cfg.OpenAIGateway.Enabled {
+		timeout := time.Duration(cfg.OpenAIGateway.TimeoutSecs) * time.Second
+		openAIGateway = core.NewOpenAIGateway(
+			cfg.OpenAIGateway.Listen,
+			cfg.OpenAIGateway.Token,
+			cfg.OpenAIGateway.Models,
+			timeout,
+		)
+		accessLog := cfg.OpenAIGateway.AccessLog != nil && *cfg.OpenAIGateway.AccessLog
+		openAIGateway.ConfigureAccessLogging(accessLog)
+		textOnly := cfg.OpenAIGateway.TextOnly != nil && *cfg.OpenAIGateway.TextOnly
+		openAIGateway.ConfigureTextOnly(textOnly)
+		persistentSessions := cfg.OpenAIGateway.PersistentSessions != nil && *cfg.OpenAIGateway.PersistentSessions
+		openAIGateway.ConfigurePersistentSessions(
+			persistentSessions,
+			time.Duration(cfg.OpenAIGateway.SessionIdleTimeoutSecs)*time.Second,
+			cfg.OpenAIGateway.MaxPersistentSessions,
+		)
+		for i, e := range engines {
+			openAIGateway.RegisterEngine(cfg.Projects[i].Name, e)
+		}
+		if err := openAIGateway.Start(); err != nil {
+			slog.Error("openai gateway start failed", "error", err)
+			os.Exit(1)
+		}
+	}
+
 	// Start internal API server for CLI send
 	apiSrv, err := core.NewAPIServer(cfg.DataDir)
 	if err != nil {
@@ -1325,6 +1354,9 @@ func main() {
 	}
 
 	slog.Info("shutting down...")
+	if openAIGateway != nil {
+		openAIGateway.Stop()
+	}
 	if mgmtSrv != nil {
 		mgmtSrv.Stop()
 	}

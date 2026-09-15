@@ -376,6 +376,69 @@ type AgentSession interface {
 	Close() error
 }
 
+// AgentSessionOptions contains request-scoped overrides used when creating a
+// fresh agent session. Implementations must not mutate the agent's shared
+// defaults when applying these values.
+type AgentSessionOptions struct {
+	Model           string
+	ReasoningEffort string
+	// CapabilityMode identifies the concrete isolation guarantee selected by
+	// the gateway for this agent (for example zero_tools or sandboxed_text).
+	CapabilityMode string
+	// TextOnly requires the agent runtime to start without any built-in or
+	// dynamically supplied tools when CapabilityMode is zero_tools. It remains
+	// true for sandboxed_text sessions so agents know the public API is text-only.
+	TextOnly bool
+}
+
+const (
+	AgentCapabilityZeroTools     = "zero_tools"
+	AgentCapabilitySandboxedText = "sandboxed_text"
+)
+
+// TextOnlySessionCapable is implemented only by agents that can enforce a
+// zero-tool session at the process or protocol boundary. Prompt instructions,
+// permission denial, and sandboxing alone do not satisfy this capability.
+type TextOnlySessionCapable interface {
+	SupportsTextOnlySessions() bool
+}
+
+// SandboxedTextSessionCapable is implemented by agents that retain internal
+// tool schemas but can isolate gateway sessions in an empty workspace with a
+// read-only sandbox, no interactive approvals, and no writable side effects.
+type SandboxedTextSessionCapable interface {
+	SupportsSandboxedTextSessions() bool
+}
+
+// SessionOptionsStarter is an optional interface for agents that support
+// isolated, per-session model and reasoning overrides.
+type SessionOptionsStarter interface {
+	StartSessionWithOptions(ctx context.Context, sessionID string, opts AgentSessionOptions) (AgentSession, error)
+}
+
+// PersistentSessionStarter is an optional capability for agents that can keep
+// their underlying runtime process alive across multiple Send calls. The
+// OpenAI-compatible gateway uses it only for explicitly requested persistent
+// sessions; ordinary platform and stateless API sessions keep their existing
+// lifecycle.
+type PersistentSessionStarter interface {
+	StartPersistentSession(ctx context.Context, sessionID string, opts AgentSessionOptions) (AgentSession, error)
+}
+
+// IsolatedSessionStarter is an optional capability for agents that can keep
+// their runtime process alive while isolating every request in a fresh logical
+// conversation. The returned session must also implement ConversationResetter.
+type IsolatedSessionStarter interface {
+	StartIsolatedSession(ctx context.Context, sessionID string, opts AgentSessionOptions) (AgentSession, error)
+}
+
+// ConversationResetter clears agent-side conversation state without stopping
+// the underlying runtime process. Implementations must not report success when
+// only wrapper-side history was cleared.
+type ConversationResetter interface {
+	ResetConversation(ctx context.Context) error
+}
+
 // PermissionResult represents the user's decision on a permission request.
 type PermissionResult struct {
 	Behavior     string         `json:"behavior"`               // "allow" or "deny"

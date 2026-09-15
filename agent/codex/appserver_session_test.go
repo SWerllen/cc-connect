@@ -228,6 +228,70 @@ func TestAppServerSession_RequestTimeoutIncludesBlockedStdinWrite(t *testing.T) 
 	}
 }
 
+func TestAppServerSession_ResetConversationStartsNewThreadWithoutClosingRuntime(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stdin := &lockedWriteCloser{}
+	s := &appServerSession{
+		ctx:          ctx,
+		cancel:       cancel,
+		events:       make(chan core.Event, 2),
+		stdin:        stdin,
+		pending:      make(map[int64]chan rpcResponseEnvelope),
+		pendingMsgs:  []string{"old"},
+		preambleSent: true,
+	}
+	s.alive.Store(true)
+	s.threadID.Store("thread-old")
+
+	done := make(chan error, 1)
+	go func() { done <- s.ResetConversation(context.Background()) }()
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		s.pendingMu.Lock()
+		_, waiting := s.pending[1]
+		s.pendingMu.Unlock()
+		if waiting {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("ResetConversation did not issue thread/start")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	result, err := json.Marshal(map[string]any{
+		"cwd":             "C:/work",
+		"model":           "gpt-test",
+		"reasoningEffort": "high",
+		"thread":          map[string]any{"id": "thread-new"},
+	})
+	if err != nil {
+		t.Fatalf("marshal response: %v", err)
+	}
+	s.handleResponse(rpcResponseEnvelope{ID: int64(1), Result: result})
+	if err := <-done; err != nil {
+		t.Fatalf("ResetConversation: %v", err)
+	}
+	if got := s.CurrentSessionID(); got != "thread-new" {
+		t.Fatalf("thread id=%q, want thread-new", got)
+	}
+	if !strings.Contains(stdin.String(), `"method":"thread/start"`) {
+		t.Fatalf("request did not use thread/start: %s", stdin.String())
+	}
+	s.stateMu.Lock()
+	pendingCount := len(s.pendingMsgs)
+	preambleSent := s.preambleSent
+	s.stateMu.Unlock()
+	if pendingCount != 0 || preambleSent {
+		t.Fatalf("state after reset: pending=%d preambleSent=%v", pendingCount, preambleSent)
+	}
+	if !s.Alive() {
+		t.Fatal("runtime was closed by logical conversation reset")
+	}
+}
+
 func TestMapAppServerRateLimits_PrefersMultiBucketView(t *testing.T) {
 	report := mapAppServerRateLimits(appServerRateLimitsResponse{
 		RateLimits: appServerRateLimitSnapshot{
@@ -400,6 +464,8 @@ var _ interface {
 var _ interface {
 	GetContextUsage() *core.ContextUsage
 } = (*appServerSession)(nil)
+
+var _ core.ConversationResetter = (*appServerSession)(nil)
 
 type lockedWriteCloser struct {
 	mu  sync.Mutex

@@ -405,6 +405,33 @@ level = "info" # debug, info, warn, error
 # cors_origins = ["http://localhost:3000"]  # Allowed CORS origins / 允许的 CORS 来源
 
 # =============================================================================
+# OpenAI-compatible Gateway / OpenAI 兼容网关
+# =============================================================================
+# Exposes text-only Chat Completions endpoints backed by a cc-connect project.
+# 将 cc-connect 项目暴露为仅文本的 Chat Completions 接口。
+# See docs/openai-gateway.md for request examples and compatibility notes.
+# 请求示例和兼容性说明请参阅 docs/openai-gateway.md。
+#
+# [openai_gateway]
+# enabled = true
+# listen = "127.0.0.1:9840"      # Default: loopback only / 默认仅监听本机
+# token = "replace-with-a-secret" # Bearer token; required outside loopback / Bearer 密钥，非本机监听时必填
+# timeout_secs = 600              # Per-request timeout / 单次请求超时
+# access_log = false              # Log safe request metadata, never tokens or bodies / 记录安全请求元数据，不记录密钥或正文
+# text_only = false               # Expose zero_tools or sandboxed_text agents only / 仅暴露零工具或沙箱文本 Agent
+# persistent_sessions = false     # Enable history and warm_reset runtime sessions / 启用历史会话与隔离式常驻运行时
+# session_idle_timeout_secs = 900 # Close an idle persistent runtime / 关闭空闲常驻运行时
+# max_persistent_sessions = 16    # Maximum live persistent runtimes / 最大常驻运行时数量
+#
+# Public project alias -> cc-connect project name. /v1/models also exposes
+# native agent models, and Chat Completions accepts reasoning_effort.
+# 公开项目别名 -> cc-connect 项目名称；/v1/models 还会暴露底层模型，
+# Chat Completions 请求可传 reasoning_effort。
+# [openai_gateway.models]
+# qoder-cli = "my-qoder-project"
+# codex-cli = "my-codex-project" # Exposed as sandboxed_text / 以沙箱文本模式暴露
+
+# =============================================================================
 # Hooks (Event Triggers / 事件钩子)
 # =============================================================================
 # Execute shell commands or send HTTP requests when lifecycle events occur.
@@ -1636,7 +1663,7 @@ app_secret = "your-feishu-app-secret"
 # model = "o3"
 #
 # Optional: specify Codex reasoning effort / 可选：指定 Codex 推理强度
-# reasoning_effort = "high"  # "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
+# reasoning_effort = "high"  # "low" | "medium" | "high" | "xhigh" | "max"
 #
 # Optional: project system prompt / 可选：项目系统提示
 # Codex has no native system-prompt flag, so cc-connect injects this as a
@@ -1774,6 +1801,7 @@ app_secret = "your-feishu-app-secret"
 # [projects.agent.options]
 # work_dir = "/path/to/project"
 # mode = "default"  # "default" | "yolo"
+# reasoning_effort = "auto"  # "auto" | "none" | "low" | "medium" | "high" | "xhigh" | "max" | "ultracode"
 #
 # Mode options / 模式说明:
 # - "default": Standard permissions / 标准权限模式

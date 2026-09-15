@@ -1,9 +1,13 @@
 package qoder
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -125,6 +129,260 @@ func TestNormalizeMode(t *testing.T) {
 	}
 }
 
+func TestNormalizeReasoningEffort(t *testing.T) {
+	for _, effort := range []string{"auto", "none", "low", "medium", "high", "xhigh", "max", "ultracode"} {
+		if got := normalizeReasoningEffort(effort); got != effort {
+			t.Fatalf("normalizeReasoningEffort(%q) = %q", effort, got)
+		}
+	}
+	if got := normalizeReasoningEffort("invalid"); got != "" {
+		t.Fatalf("normalizeReasoningEffort(invalid) = %q, want empty", got)
+	}
+}
+
+func TestParseQoderModelsOutput(t *testing.T) {
+	models := parseQoderModelsOutput("MODEL\nAuto\nQwen3.8-Max\nCustom Name (mode-123)\n")
+	if len(models) != 3 {
+		t.Fatalf("len(models) = %d, want 3: %+v", len(models), models)
+	}
+	if models[0].Name != "auto" || models[1].Name != "Qwen3.8-Max" {
+		t.Fatalf("unexpected standard models: %+v", models)
+	}
+	if models[2].Name != "mode-123" || models[2].Desc != "Custom Name" {
+		t.Fatalf("unexpected custom model: %+v", models[2])
+	}
+}
+
+func TestQoderModelListHelperProcess(t *testing.T) {
+	if os.Getenv("GO_WANT_QODER_MODEL_HELPER") != "1" {
+		return
+	}
+	fmt.Print("MODEL\nAuto\nQwen3.8-Max\n")
+	os.Exit(0)
+}
+
+func TestAgent_AvailableModelsRefreshesAsynchronously(t *testing.T) {
+	cachePath := filepath.Join(t.TempDir(), "qoder-models.json")
+	a := &Agent{
+		cmd:            os.Args[0],
+		cliExtraArgs:   []string{"-test.run=TestQoderModelListHelperProcess", "--"},
+		configEnv:      []string{"GO_WANT_QODER_MODEL_HELPER=1"},
+		modelCachePath: cachePath,
+	}
+	started := time.Now()
+	initial := a.AvailableModels(context.Background())
+	if time.Since(started) > 500*time.Millisecond {
+		t.Fatal("initial model listing blocked on the Qoder subprocess")
+	}
+	if len(initial) != len(qoderFallbackModels()) {
+		t.Fatalf("initial models = %+v, want fallback", initial)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		models := a.AvailableModels(context.Background())
+		if len(models) == 2 && models[0].Name == "auto" && models[1].Name == "Qwen3.8-Max" {
+			cached, err := loadQoderPersistentModelCache(cachePath)
+			if err != nil {
+				t.Fatalf("load cache: %v", err)
+			}
+			if len(cached) != 2 || cached[1].Name != "Qwen3.8-Max" {
+				t.Fatalf("cached models = %+v", cached)
+			}
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("timed out waiting for asynchronous Qoder model refresh")
+}
+
+func TestQoderPersistentModelCacheIsAvailableOnColdStart(t *testing.T) {
+	dataDir := t.TempDir()
+	project := "qoder-cold-start"
+	cachePath := qoderProjectModelCachePath(dataDir, project)
+	want := []core.ModelOption{{Name: "auto"}, {Name: "Qwen3.8-Flash"}}
+	if err := storeQoderPersistentModelCache(cachePath, want); err != nil {
+		t.Fatalf("store cache: %v", err)
+	}
+	agent, err := New(map[string]any{
+		"cmd":         []string{os.Args[0]},
+		"cc_data_dir": dataDir,
+		"cc_project":  project,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	got := agent.(*Agent).AvailableModels(context.Background())
+	if len(got) != len(want) || got[0].Name != "auto" || got[1].Name != "Qwen3.8-Flash" {
+		t.Fatalf("cold-start models = %+v, want %+v", got, want)
+	}
+}
+
+func TestAgent_StartSessionWithOptionsIsolated(t *testing.T) {
+	a := &Agent{workDir: ".", model: "auto", reasoningEffort: "medium"}
+	session, err := a.StartSessionWithOptions(context.Background(), "", core.AgentSessionOptions{
+		Model:           "Ultimate",
+		ReasoningEffort: "xhigh",
+		TextOnly:        true,
+	})
+	if err != nil {
+		t.Fatalf("StartSessionWithOptions: %v", err)
+	}
+	defer session.Close()
+
+	qs := session.(*qoderSession)
+	if qs.model != "Ultimate" || qs.reasoningEffort != "xhigh" || !qs.textOnly {
+		t.Fatalf("session overrides = model %q effort %q", qs.model, qs.reasoningEffort)
+	}
+	if a.GetModel() != "auto" || a.GetReasoningEffort() != "medium" {
+		t.Fatalf("shared defaults mutated = model %q effort %q", a.GetModel(), a.GetReasoningEffort())
+	}
+}
+
+func TestAppendTextOnlyArgsPreservesEmptyToolsValue(t *testing.T) {
+	base := []string{"--print"}
+	got := appendTextOnlyArgs(append([]string(nil), base...), true)
+	want := []string{"--print", "--tools", ""}
+	if len(got) != len(want) {
+		t.Fatalf("args = %#v, want %#v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("args = %#v, want %#v", got, want)
+		}
+	}
+	if unchanged := appendTextOnlyArgs(append([]string(nil), base...), false); len(unchanged) != 1 || unchanged[0] != "--print" {
+		t.Fatalf("disabled args = %#v", unchanged)
+	}
+}
+
+func TestQoderPersistentSessionHelperProcess(t *testing.T) {
+	if os.Getenv("GO_WANT_QODER_PERSISTENT_HELPER") != "1" {
+		return
+	}
+	scanner := bufio.NewScanner(os.Stdin)
+	turn := 0
+	for scanner.Scan() {
+		var input map[string]any
+		if err := json.Unmarshal(scanner.Bytes(), &input); err != nil || input["type"] != "user" {
+			fmt.Printf("{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"result\":\"bad-input\",\"session_id\":\"persistent-helper\"}\n")
+			continue
+		}
+		turn++
+		fmt.Printf("{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"turn-%d\",\"session_id\":\"persistent-helper\"}\n", turn)
+	}
+	os.Exit(0)
+}
+
+func TestAgent_StartPersistentSessionKeepsOneQoderProcessAcrossTurns(t *testing.T) {
+	agent := &Agent{
+		cmd:          os.Args[0],
+		cliExtraArgs: []string{"-test.run=TestQoderPersistentSessionHelperProcess", "--"},
+		configEnv:    []string{"GO_WANT_QODER_PERSISTENT_HELPER=1"},
+		workDir:      ".",
+		model:        "efficient",
+		mode:         "default",
+	}
+	session, err := agent.StartPersistentSession(context.Background(), "", core.AgentSessionOptions{ReasoningEffort: "low"})
+	if err != nil {
+		t.Fatalf("StartPersistentSession: %v", err)
+	}
+	defer session.Close()
+
+	for turn, want := range []string{"turn-1", "turn-2"} {
+		if err := session.Send(fmt.Sprintf("message-%d", turn+1), "", nil, nil); err != nil {
+			t.Fatalf("turn %d Send: %v", turn+1, err)
+		}
+		select {
+		case event := <-session.Events():
+			if event.Type != core.EventResult || event.Content != want {
+				t.Fatalf("turn %d event = %+v, want result %q", turn+1, event, want)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("turn %d timed out", turn+1)
+		}
+	}
+	if got := session.CurrentSessionID(); got != "persistent-helper" {
+		t.Fatalf("session id = %q", got)
+	}
+}
+
+func TestQoderPersistentSessionResetUsesConversationOnlyRewind(t *testing.T) {
+	request, err := runQoderResetProtocol(t, "success", "success", "")
+	if err != nil {
+		t.Fatalf("ResetConversation: %v", err)
+	}
+	control, ok := request["request"].(map[string]any)
+	if !ok {
+		t.Fatalf("request payload = %#v", request)
+	}
+	if control["subtype"] != "rewind" || control["scope"] != "conversation" {
+		t.Fatalf("rewind control = %#v", control)
+	}
+	if control["user_message_id"] != "user-turn-1" {
+		t.Fatalf("user_message_id = %#v", control["user_message_id"])
+	}
+}
+
+func TestQoderPersistentSessionResetRejectsUnconfirmedRewind(t *testing.T) {
+	_, err := runQoderResetProtocol(t, "error", "failed", "rewind unavailable")
+	if err == nil {
+		t.Fatal("ResetConversation succeeded without a successful rewind confirmation")
+	}
+}
+
+func runQoderResetProtocol(t *testing.T, subtype, status, responseError string) (map[string]any, error) {
+	t.Helper()
+	base := newTestSession()
+	defer base.cancel()
+	reader, writer := io.Pipe()
+	defer reader.Close()
+	defer writer.Close()
+	session := &qoderPersistentSession{
+		base:              base,
+		isolated:          true,
+		stdin:             writer,
+		lastUserMessageID: "user-turn-1",
+		pendingResets:     make(map[string]chan qoderRewindResponse),
+	}
+	resultCh := make(chan error, 1)
+	go func() { resultCh <- session.ResetConversation(context.Background()) }()
+
+	line, err := bufio.NewReader(reader).ReadBytes('\n')
+	if err != nil {
+		t.Fatalf("read rewind request: %v", err)
+	}
+	var request map[string]any
+	if err := json.Unmarshal(line, &request); err != nil {
+		t.Fatalf("decode rewind request: %v", err)
+	}
+	requestID, _ := request["request_id"].(string)
+	response, err := json.Marshal(map[string]any{
+		"type": "control_response",
+		"response": map[string]any{
+			"subtype":    subtype,
+			"request_id": requestID,
+			"response": map[string]any{
+				"status": status,
+				"error":  responseError,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("encode rewind response: %v", err)
+	}
+	if !session.handleControlResponse(response) {
+		t.Fatal("control response was not recognized")
+	}
+	select {
+	case resetErr := <-resultCh:
+		return request, resetErr
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for ResetConversation")
+		return nil, nil
+	}
+}
+
 func TestAgent_Name(t *testing.T) {
 	a := &Agent{}
 	if got := a.Name(); got != "qoder" {
@@ -167,6 +425,10 @@ func TestAgent_SetModel(t *testing.T) {
 
 // verify Agent implements core.Agent
 var _ core.Agent = (*Agent)(nil)
+var _ core.SessionOptionsStarter = (*Agent)(nil)
+var _ core.IsolatedSessionStarter = (*Agent)(nil)
+var _ core.ReasoningEffortSwitcher = (*Agent)(nil)
+var _ core.ConversationResetter = (*qoderPersistentSession)(nil)
 
 // ── handleEvent unit tests (old vs new qodercli format) ──
 

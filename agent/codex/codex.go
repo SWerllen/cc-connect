@@ -467,6 +467,41 @@ func (a *Agent) SetSessionEnv(env []string) {
 }
 
 func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentSession, error) {
+	return a.startSession(ctx, sessionID, core.AgentSessionOptions{})
+}
+
+// SupportsSandboxedTextSessions reports that Codex gateway sessions can be
+// isolated in a dedicated empty workspace with read-only execution and no
+// interactive approval path. Codex still retains internal built-in schemas.
+func (a *Agent) SupportsSandboxedTextSessions() bool { return true }
+
+// StartSessionWithOptions applies model and reasoning overrides only to the
+// newly created session. The agent defaults shared by Feishu and other gateway
+// requests remain unchanged.
+func (a *Agent) StartSessionWithOptions(ctx context.Context, sessionID string, opts core.AgentSessionOptions) (core.AgentSession, error) {
+	return a.startSession(ctx, sessionID, opts)
+}
+
+func (a *Agent) startSession(ctx context.Context, sessionID string, opts core.AgentSessionOptions) (core.AgentSession, error) {
+	return a.startSessionInternal(ctx, sessionID, opts, false)
+}
+
+// StartPersistentSession uses the bidirectional Codex app-server transport even
+// when the project's normal backend is exec. This keeps one Codex process alive
+// for the lifetime of an explicitly persistent API session without changing
+// Feishu or stateless gateway behavior.
+func (a *Agent) StartPersistentSession(ctx context.Context, sessionID string, opts core.AgentSessionOptions) (core.AgentSession, error) {
+	return a.startSessionInternal(ctx, sessionID, opts, true)
+}
+
+// StartIsolatedSession keeps the Codex app-server process alive. The gateway
+// calls ResetConversation after every completed request to switch the process
+// to a newly started, empty Codex thread.
+func (a *Agent) StartIsolatedSession(ctx context.Context, sessionID string, opts core.AgentSessionOptions) (core.AgentSession, error) {
+	return a.startSessionInternal(ctx, sessionID, opts, true)
+}
+
+func (a *Agent) startSessionInternal(ctx context.Context, sessionID string, opts core.AgentSessionOptions, forcePersistent bool) (core.AgentSession, error) {
 	a.mu.Lock()
 	mode := a.mode
 	model := a.model
@@ -496,6 +531,30 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	provName, provAPIKey, provWireAPI, provHeaders := a.activeProviderCodexConfig()
 	a.mu.Unlock()
 
+	if requestedModel := strings.TrimSpace(opts.Model); requestedModel != "" {
+		model = requestedModel
+	}
+	if requestedEffort := strings.TrimSpace(opts.ReasoningEffort); requestedEffort != "" {
+		reasoningEffort = normalizeReasoningEffort(requestedEffort)
+		if reasoningEffort == "" {
+			return nil, fmt.Errorf("codex: unsupported reasoning effort %q", requestedEffort)
+		}
+	}
+	sandboxedTextDir := ""
+	if opts.CapabilityMode == core.AgentCapabilitySandboxedText {
+		var err error
+		sandboxedTextDir, err = newCodexSandboxedTextWorkDir()
+		if err != nil {
+			return nil, err
+		}
+		workDir = sandboxedTextDir
+		mode = codexSandboxedTextMode
+		systemPrompt = codexSandboxedTextInstructions
+		appendPrompt = ""
+		forcePersistent = true
+	}
+	backend, appServerURL = resolveSessionBackend(backend, appServerURL, forcePersistent)
+
 	if provName != "" {
 		if err := ensureCodexProviderConfig(codexHome, provName, baseURL, provWireAPI, provHeaders); err != nil {
 			slog.Warn("codex: failed to write provider config", "provider", provName, "error", err)
@@ -505,14 +564,33 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 		}
 	}
 
+	var session core.AgentSession
+	var err error
 	if backend == "app_server" {
-		return newAppServerSession(ctx, appServerURL, workDir, model, reasoningEffort, mode, sessionID, baseURL, provName, extraEnv, codexHome, systemPrompt, appendPrompt)
+		session, err = newAppServerSession(ctx, appServerURL, workDir, model, reasoningEffort, mode, sessionID, baseURL, provName, extraEnv, codexHome, systemPrompt, appendPrompt)
+	} else {
+		if codexHome != "" {
+			extraEnv = append(extraEnv, "CODEX_HOME="+codexHome)
+		}
+		session, err = newCodexSession(ctx, cliBin, cliExtraArgs, workDir, model, reasoningEffort, mode, sessionID, baseURL, extraEnv, provName, systemPrompt, appendPrompt)
 	}
-	if codexHome != "" {
-		extraEnv = append(extraEnv, "CODEX_HOME="+codexHome)
+	if err != nil {
+		if sandboxedTextDir != "" {
+			_ = removeCodexSandboxedTextWorkDir(sandboxedTextDir)
+		}
+		return nil, err
 	}
+	if sandboxedTextDir != "" {
+		return newCodexSandboxedTextSession(session, sandboxedTextDir), nil
+	}
+	return session, nil
+}
 
-	return newCodexSession(ctx, cliBin, cliExtraArgs, workDir, model, reasoningEffort, mode, sessionID, baseURL, extraEnv, provName, systemPrompt, appendPrompt)
+func resolveSessionBackend(backend, appServerURL string, forcePersistent bool) (string, string) {
+	if forcePersistent {
+		return "app_server", "stdio://"
+	}
+	return backend, appServerURL
 }
 
 func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error) {

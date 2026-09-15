@@ -23,19 +23,21 @@ import (
 // Each Send() spawns `qodercli -p <prompt> -f stream-json -q`.
 // Subsequent turns use `-r <sessionID>` to resume the conversation.
 type qoderSession struct {
-	cmd            string
-	extraArgs      []string // extra args from cmd, prepended before qoder args
-	workDir        string
-	model          string
-	mode           string
-	extraEnv       []string
-	events         chan core.Event
-	sessionID      atomic.Value // stores string
-	ctx            context.Context
-	cancel         context.CancelFunc
-	wg             sync.WaitGroup
-	alive          atomic.Bool
-	startupWarning string
+	cmd             string
+	extraArgs       []string // extra args from cmd, prepended before qoder args
+	workDir         string
+	model           string
+	reasoningEffort string
+	textOnly        bool
+	mode            string
+	extraEnv        []string
+	events          chan core.Event
+	sessionID       atomic.Value // stores string
+	ctx             context.Context
+	cancel          context.CancelFunc
+	wg              sync.WaitGroup
+	alive           atomic.Bool
+	startupWarning  string
 
 	textMu             sync.Mutex
 	assistantTextByID  map[string]string
@@ -49,19 +51,21 @@ const maxAssistantTextCacheEntries = 1024
 // silently skipped under root).
 func (qs *qoderSession) StartupWarning() string { return qs.startupWarning }
 
-func newQoderSession(ctx context.Context, cmd string, extraArgs []string, workDir, model, mode, resumeID string, extraEnv []string) (*qoderSession, error) {
+func newQoderSession(ctx context.Context, cmd string, extraArgs []string, workDir, model, reasoningEffort, mode, resumeID string, extraEnv []string, textOnly bool) (*qoderSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 
 	qs := &qoderSession{
-		cmd:       cmd,
-		extraArgs: extraArgs,
-		workDir:   workDir,
-		model:     model,
-		mode:      mode,
-		extraEnv:  extraEnv,
-		events:    make(chan core.Event, 64),
-		ctx:       sessionCtx,
-		cancel:    cancel,
+		cmd:             cmd,
+		extraArgs:       extraArgs,
+		workDir:         workDir,
+		model:           model,
+		reasoningEffort: reasoningEffort,
+		textOnly:        textOnly,
+		mode:            mode,
+		extraEnv:        extraEnv,
+		events:          make(chan core.Event, 64),
+		ctx:             sessionCtx,
+		cancel:          cancel,
 
 		assistantTextByID: make(map[string]string),
 	}
@@ -92,7 +96,8 @@ func (qs *qoderSession) Send(prompt string, messageID string, images []core.Imag
 		return fmt.Errorf("session is closed")
 	}
 
-	args := append(append([]string{}, qs.extraArgs...), "-p", prompt, "-f", "stream-json", "-q", "-w", qs.workDir)
+	args := appendTextOnlyArgs(append([]string{}, qs.extraArgs...), qs.textOnly)
+	args = append(args, "-p", prompt, "-f", "stream-json", "-q", "-w", qs.workDir)
 
 	sid := qs.CurrentSessionID()
 	if sid != "" {
@@ -109,6 +114,9 @@ func (qs *qoderSession) Send(prompt string, messageID string, images []core.Imag
 
 	if qs.model != "" {
 		args = append(args, "--model", qs.model)
+	}
+	if qs.reasoningEffort != "" {
+		args = append(args, "--reasoning-effort", qs.reasoningEffort)
 	}
 
 	slog.Debug("qoderSession: launching", "resume", sid != "", "args_len", len(args))
@@ -135,6 +143,15 @@ func (qs *qoderSession) Send(prompt string, messageID string, images []core.Imag
 	go qs.readLoop(cmd, stdout, &stderrBuf)
 
 	return nil
+}
+
+func appendTextOnlyArgs(args []string, textOnly bool) []string {
+	if !textOnly {
+		return args
+	}
+	// Qoder documents an empty --tools value as the process-level switch that
+	// disables every built-in tool. Keep the empty argv element intact.
+	return append(args, "--tools", "")
 }
 
 func (qs *qoderSession) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, stderrBuf *bytes.Buffer) {

@@ -189,6 +189,7 @@ type appServerSession struct {
 const (
 	appServerRequestTimeout      = 120 * time.Second
 	appServerUsageRefreshTimeout = 1500 * time.Millisecond
+	appServerCloseWait           = 5 * time.Second
 )
 
 func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode, resumeID, baseURL, modelProvider string, extraEnv []string, codexHome string, systemPrompt string, appendPrompt string) (*appServerSession, error) {
@@ -273,6 +274,7 @@ func (s *appServerSession) connect() error {
 		args = append(args, "-c", fmt.Sprintf("openai_base_url=%q", baseURL))
 	}
 	cmd := exec.CommandContext(s.ctx, "codex", args...)
+	prepareCmdForKill(cmd)
 	cmd.Dir = s.workDir
 	env := append([]string(nil), s.extraEnv...)
 	if s.codexHome != "" {
@@ -374,10 +376,71 @@ func (s *appServerSession) ensureThread(resumeID string) error {
 	return nil
 }
 
+// ResetConversation starts a new empty logical thread inside the existing
+// app-server process. It intentionally retains the runtime, model, reasoning,
+// working directory, and permission configuration.
+func (s *appServerSession) ResetConversation(ctx context.Context) error {
+	if !s.alive.Load() {
+		return fmt.Errorf("codex app-server session is closed")
+	}
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+	}
+
+	s.stateMu.Lock()
+	if s.currentTurn != "" {
+		turnID := s.currentTurn
+		s.stateMu.Unlock()
+		return fmt.Errorf("codex app-server cannot reset while turn %q is active", turnID)
+	}
+	s.stateMu.Unlock()
+
+	timeout := appServerRequestTimeout
+	if ctx != nil {
+		if deadline, ok := ctx.Deadline(); ok {
+			remaining := time.Until(deadline)
+			if remaining <= 0 {
+				return context.DeadlineExceeded
+			}
+			if remaining < timeout {
+				timeout = remaining
+			}
+		}
+	}
+
+	var resp threadStartResponse
+	if err := s.requestWithTimeout("thread/start", s.threadRequestParams(), &resp, timeout); err != nil {
+		return fmt.Errorf("codex app-server reset thread/start: %w", err)
+	}
+	if resp.Thread.ID == "" {
+		return fmt.Errorf("codex app-server reset returned empty thread id")
+	}
+
+	s.applyThreadRuntimeState(resp.Cwd, resp.Model, resp.ReasoningEffort)
+	s.threadID.Store(resp.Thread.ID)
+	s.stateMu.Lock()
+	s.pendingMsgs = s.pendingMsgs[:0]
+	s.preambleSent = false
+	s.stateMu.Unlock()
+	s.runtimeMu.Lock()
+	s.context = nil
+	s.runtimeMu.Unlock()
+	slog.Info("codex app-server conversation reset", "thread_id", resp.Thread.ID)
+	return nil
+}
+
 func (s *appServerSession) threadRequestParams() map[string]any {
 	params := map[string]any{
 		"experimentalRawEvents":  false,
 		"persistExtendedHistory": false,
+	}
+	if s.mode == codexSandboxedTextMode {
+		params["cwd"] = s.workDir
+		params["ephemeral"] = true
+		params["dynamicTools"] = []any{}
+		params["developerInstructions"] = codexSandboxedTextInstructions
 	}
 	if model := s.GetModel(); model != "" {
 		params["model"] = model
@@ -392,6 +455,9 @@ func (s *appServerSession) threadRequestParams() map[string]any {
 }
 
 func appServerModeSettings(mode string) (approval string, sandbox string) {
+	if strings.EqualFold(strings.TrimSpace(mode), codexSandboxedTextMode) {
+		return "never", "read-only"
+	}
 	switch normalizeMode(mode) {
 	case "auto-edit", "full-auto":
 		return "never", "workspace-write"
@@ -960,17 +1026,19 @@ func (s *appServerSession) Alive() bool {
 
 func (s *appServerSession) Close() error {
 	s.alive.Store(false)
-	s.cancel()
 
+	var killErr error
 	s.procMu.Lock()
 	if s.stdin != nil {
 		_ = s.stdin.Close()
 		s.stdin = nil
 	}
-	if s.cmd != nil && s.cmd.Process != nil {
-		_ = s.cmd.Process.Kill()
-	}
+	cmd := s.cmd
 	s.procMu.Unlock()
+	if cmd != nil {
+		killErr = forceKillCmd(cmd)
+	}
+	s.cancel()
 
 	done := make(chan struct{})
 	go func() {
@@ -978,15 +1046,24 @@ func (s *appServerSession) Close() error {
 		close(done)
 	}()
 
+	var waitErr error
 	select {
 	case <-done:
-	case <-time.After(2 * time.Second):
+		s.closeOnce.Do(func() {
+			close(s.events)
+		})
+	case <-time.After(appServerCloseWait):
+		waitErr = fmt.Errorf("codex app-server process tree did not exit within %s", appServerCloseWait)
+		// Do not close the event channel while readLoop may still emit. Finish
+		// asynchronously once every transport goroutine has actually stopped.
+		go func() {
+			<-done
+			s.closeOnce.Do(func() {
+				close(s.events)
+			})
+		}()
 	}
-
-	s.closeOnce.Do(func() {
-		close(s.events)
-	})
-	return nil
+	return errors.Join(killErr, waitErr)
 }
 
 func (s *appServerSession) readLoop(r io.Reader) {
@@ -1720,19 +1797,22 @@ func (s *appServerSession) contextErr() error {
 
 func (s *appServerSession) abortTransport() {
 	s.alive.Store(false)
-	if s.cancel != nil {
-		s.cancel()
-	}
 
 	s.procMu.Lock()
 	if s.stdin != nil {
 		_ = s.stdin.Close()
 		s.stdin = nil
 	}
-	if s.cmd != nil && s.cmd.Process != nil {
-		_ = s.cmd.Process.Kill()
-	}
+	cmd := s.cmd
 	s.procMu.Unlock()
+	if cmd != nil {
+		if err := forceKillCmd(cmd); err != nil {
+			slog.Warn("codex app-server process tree kill failed", "error", err)
+		}
+	}
+	if s.cancel != nil {
+		s.cancel()
+	}
 }
 
 func (s *appServerSession) notify(method string, params any) error {

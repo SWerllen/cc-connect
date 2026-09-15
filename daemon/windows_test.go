@@ -117,6 +117,21 @@ func TestWindowsTaskMatchesActionRequiresExactAction(t *testing.T) {
 	}
 }
 
+func TestBuildStopWindowsTaskScriptStopsDescendants(t *testing.T) {
+	script := buildStopWindowsTaskScript(`C:\Users\me\.cc-connect\cc-connect-daemon.ps1`)
+	for _, want := range []string{
+		`$expectedFragment = '-File "' + $daemonScript + '"'`,
+		`Get-CimInstance Win32_Process`,
+		`$_.ParentProcessId`,
+		`Stop-ScheduledTask`,
+		`Stop-Process -Id $childPid -Force`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("stop script missing %q:\n%s", want, script)
+		}
+	}
+}
+
 func TestPowerShellLiteralEscapesSingleQuotes(t *testing.T) {
 	got := powerShellLiteral(`C:\Users\O'Brien\.cc-connect`)
 	want := `'C:\Users\O''Brien\.cc-connect'`
