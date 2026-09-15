@@ -53,6 +53,10 @@ type Agent struct {
 }
 
 func New(opts map[string]any) (core.Agent, error) {
+	if err := cleanupStaleCodexSandboxedTextWorkDirs(); err != nil {
+		slog.Warn("codex: stale sandboxed text workspace cleanup incomplete", "error", err)
+	}
+
 	workDir, _ := opts["work_dir"].(string)
 	if workDir == "" {
 		workDir = "."

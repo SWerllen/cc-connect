@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -62,11 +63,53 @@ func (s *codexSandboxedTextSession) Close() error {
 }
 
 func newCodexSandboxedTextWorkDir() (string, error) {
-	workDir, err := os.MkdirTemp("", codexSandboxedTextDirPrefix)
+	workDir, err := os.MkdirTemp("", fmt.Sprintf("%s%d-", codexSandboxedTextDirPrefix, os.Getpid()))
 	if err != nil {
 		return "", fmt.Errorf("codex: create sandboxed text workspace: %w", err)
 	}
 	return workDir, nil
+}
+
+func cleanupStaleCodexSandboxedTextWorkDirs() error {
+	return cleanupStaleCodexSandboxedTextWorkDirsAt(os.TempDir(), sandboxedTextOwnerProcessAlive)
+}
+
+func cleanupStaleCodexSandboxedTextWorkDirsAt(tempRoot string, processAlive func(int) bool) error {
+	entries, err := os.ReadDir(tempRoot)
+	if err != nil {
+		return fmt.Errorf("codex: read temporary directory for sandbox cleanup: %w", err)
+	}
+
+	var cleanupErr error
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		ownerPID, ok := codexSandboxedTextOwnerPID(entry.Name())
+		if !ok || ownerPID == os.Getpid() || processAlive(ownerPID) {
+			continue
+		}
+		if err := removeCodexSandboxedTextWorkDir(filepath.Join(tempRoot, entry.Name())); err != nil {
+			cleanupErr = errors.Join(cleanupErr, err)
+		}
+	}
+	return cleanupErr
+}
+
+func codexSandboxedTextOwnerPID(name string) (int, bool) {
+	remainder := strings.TrimPrefix(name, codexSandboxedTextDirPrefix)
+	if remainder == name {
+		return 0, false
+	}
+	separator := strings.IndexByte(remainder, '-')
+	if separator <= 0 || separator == len(remainder)-1 {
+		return 0, false
+	}
+	pid, err := strconv.Atoi(remainder[:separator])
+	if err != nil || pid <= 0 {
+		return 0, false
+	}
+	return pid, true
 }
 
 func removeCodexSandboxedTextWorkDir(workDir string) error {

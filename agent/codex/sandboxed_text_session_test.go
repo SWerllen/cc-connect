@@ -87,3 +87,49 @@ func TestSandboxedTextWorkspaceCleanupRetriesTransientWindowsHandle(t *testing.T
 		t.Fatalf("cleanup attempts = %d, want 3", attempts)
 	}
 }
+
+func TestCodexSandboxedTextOwnerPID(t *testing.T) {
+	name := codexSandboxedTextDirPrefix + "12345-987654"
+	pid, ok := codexSandboxedTextOwnerPID(name)
+	if !ok || pid != 12345 {
+		t.Fatalf("codexSandboxedTextOwnerPID(%q) = (%d, %v), want (12345, true)", name, pid, ok)
+	}
+	for _, invalid := range []string{
+		codexSandboxedTextDirPrefix + "legacy",
+		codexSandboxedTextDirPrefix + "12345",
+		codexSandboxedTextDirPrefix + "bad-123",
+		"unrelated-123-456",
+	} {
+		if _, ok := codexSandboxedTextOwnerPID(invalid); ok {
+			t.Fatalf("codexSandboxedTextOwnerPID(%q) unexpectedly succeeded", invalid)
+		}
+	}
+}
+
+func TestCleanupStaleCodexSandboxedTextWorkDirsSkipsLiveAndLegacyOwners(t *testing.T) {
+	tempRoot := t.TempDir()
+	staleDir, err := os.MkdirTemp(tempRoot, codexSandboxedTextDirPrefix+"222-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	liveDir, err := os.MkdirTemp(tempRoot, codexSandboxedTextDirPrefix+"111-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyDir, err := os.MkdirTemp(tempRoot, codexSandboxedTextDirPrefix)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := cleanupStaleCodexSandboxedTextWorkDirsAt(tempRoot, func(pid int) bool { return pid == 111 }); err != nil {
+		t.Fatalf("cleanupStaleCodexSandboxedTextWorkDirsAt: %v", err)
+	}
+	if _, err := os.Stat(staleDir); !os.IsNotExist(err) {
+		t.Fatalf("stale directory still exists, stat err = %v", err)
+	}
+	for _, retained := range []string{liveDir, legacyDir} {
+		if _, err := os.Stat(retained); err != nil {
+			t.Fatalf("retained directory %q: %v", retained, err)
+		}
+	}
+}
