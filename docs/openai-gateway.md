@@ -110,7 +110,11 @@ response = client.chat.completions.create(
 print(response.choices[0].message.content)
 ```
 
-For streaming, set `stream=True` in an SDK or `"stream": true` in JSON. `stream_options.include_usage` is supported.
+For streaming, set `stream=True` in an SDK or `"stream": true` in JSON. `stream_options.include_usage` is supported. Clients that want agent-provided reasoning summaries or progress may also opt in with `stream_options.include_reasoning: true`; those chunks use the OpenAI-compatible extension `delta.reasoning_content`. Reasoning is never mixed into `delta.content`, and provider-redacted reasoning is never forwarded.
+
+For a production-oriented Chinese integration example, including incremental
+JSON assembly, cancellation, session reset, and timeout guidance, see
+[导演台 SSE 与推理进度接入说明](openai-gateway-director-streaming.zh-CN.md).
 
 ### Persistent sessions
 

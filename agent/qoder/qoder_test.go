@@ -539,7 +539,7 @@ func TestHandleAssistant_EmitsNonFinishedText(t *testing.T) {
 	}
 }
 
-func TestHandleAssistant_ThinkingDoesNotBlockTextOnSameID(t *testing.T) {
+func TestHandleAssistant_ThinkingStreamsButRedactedThinkingStaysHidden(t *testing.T) {
 	qs := newTestSession()
 	defer qs.cancel()
 
@@ -547,7 +547,7 @@ func TestHandleAssistant_ThinkingDoesNotBlockTextOnSameID(t *testing.T) {
 		Type: "assistant",
 		Message: &streamMessage{
 			ID:      "msg-same-id",
-			Content: []byte(`[{"type":"thinking","thinking":"hidden"},{"type":"redacted_thinking","data":"secret"}]`),
+			Content: []byte(`[{"type":"thinking","thinking":"visible progress"},{"type":"redacted_thinking","data":"secret"}]`),
 		},
 	}
 	text := &streamEvent{
@@ -562,7 +562,15 @@ func TestHandleAssistant_ThinkingDoesNotBlockTextOnSameID(t *testing.T) {
 	qs.handleEvent(thinking)
 	select {
 	case got := <-qs.events:
-		t.Fatalf("expected thinking frames to be skipped, got type=%s content=%q", got.Type, got.Content)
+		if got.Type != core.EventThinking || got.Content != "visible progress" {
+			t.Fatalf("got type=%s content=%q, want EventThinking/visible progress", got.Type, got.Content)
+		}
+	default:
+		t.Fatal("expected a visible thinking event")
+	}
+	select {
+	case got := <-qs.events:
+		t.Fatalf("redacted thinking leaked as type=%s content=%q", got.Type, got.Content)
 	default:
 	}
 
@@ -574,6 +582,44 @@ func TestHandleAssistant_ThinkingDoesNotBlockTextOnSameID(t *testing.T) {
 		}
 	default:
 		t.Error("expected text after thinking frames")
+	}
+}
+
+func TestHandleAssistant_DeduplicatesCumulativeThinkingForSameMessageID(t *testing.T) {
+	qs := newTestSession()
+	defer qs.cancel()
+
+	for _, content := range []string{
+		`[{"type":"thinking","thinking":"checking"}]`,
+		`[{"type":"thinking","thinking":"checking constraints"}]`,
+		`[{"type":"thinking","thinking":"checking constraints"}]`,
+	} {
+		qs.handleEvent(&streamEvent{
+			Type: "assistant",
+			Message: &streamMessage{
+				ID:      "thinking-cumulative",
+				Content: []byte(content),
+			},
+		})
+	}
+
+	var got []core.Event
+	for {
+		select {
+		case event := <-qs.events:
+			got = append(got, event)
+		default:
+			if len(got) != 2 {
+				t.Fatalf("thinking event count = %d, want 2: %#v", len(got), got)
+			}
+			if got[0].Type != core.EventThinking || got[0].Content != "checking" {
+				t.Fatalf("first thinking event = %#v", got[0])
+			}
+			if got[1].Type != core.EventThinking || got[1].Content != " constraints" {
+				t.Fatalf("second thinking event = %#v", got[1])
+			}
+			return
+		}
 	}
 }
 

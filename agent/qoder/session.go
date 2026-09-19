@@ -42,6 +42,8 @@ type qoderSession struct {
 	textMu             sync.Mutex
 	assistantTextByID  map[string]string
 	assistantTextOrder []string
+	thinkingTextByID   map[string]string
+	thinkingTextOrder  []string
 }
 
 const maxAssistantTextCacheEntries = 1024
@@ -68,6 +70,7 @@ func newQoderSession(ctx context.Context, cmd string, extraArgs []string, workDi
 		cancel:          cancel,
 
 		assistantTextByID: make(map[string]string),
+		thinkingTextByID:  make(map[string]string),
 	}
 	qs.alive.Store(true)
 
@@ -265,6 +268,7 @@ type streamMessage struct {
 type contentItem struct {
 	Type     string `json:"type"`
 	Text     string `json:"text"`
+	Thinking string `json:"thinking"`
 	Name     string `json:"name"`
 	Input    string `json:"input"`
 	Reason   string `json:"reason"`
@@ -314,6 +318,16 @@ func (qs *qoderSession) handleAssistant(ev *streamEvent) {
 			if !qs.emitAssistantText(ev.Message.ID, item.Text) {
 				return
 			}
+
+		case "thinking":
+			if !qs.emitThinkingText(ev.Message.ID, item.Thinking) {
+				return
+			}
+
+		case "redacted_thinking":
+			// Redacted reasoning is intentionally never forwarded. It may contain
+			// provider-private or safety-sensitive internal state.
+			continue
 
 		case "function":
 			if !isFinished {
@@ -371,6 +385,45 @@ func (qs *qoderSession) emitAssistantText(messageID, text string) bool {
 	}
 }
 
+func (qs *qoderSession) emitThinkingText(messageID, text string) bool {
+	if text == "" {
+		return true
+	}
+
+	chunk := text
+	if messageID != "" {
+		qs.textMu.Lock()
+		if qs.thinkingTextByID == nil {
+			qs.thinkingTextByID = make(map[string]string)
+		}
+		prev := qs.thinkingTextByID[messageID]
+		switch {
+		case text == prev:
+			qs.textMu.Unlock()
+			return true
+		case prev != "" && strings.HasPrefix(text, prev):
+			chunk = strings.TrimPrefix(text, prev)
+			qs.setThinkingTextLocked(messageID, text)
+		case prev != "":
+			qs.setThinkingTextLocked(messageID, prev+text)
+		default:
+			qs.setThinkingTextLocked(messageID, text)
+		}
+		qs.textMu.Unlock()
+	}
+
+	if chunk == "" {
+		return true
+	}
+	evt := core.Event{Type: core.EventThinking, Content: chunk}
+	select {
+	case qs.events <- evt:
+		return true
+	case <-qs.ctx.Done():
+		return false
+	}
+}
+
 func (qs *qoderSession) setAssistantTextLocked(messageID, text string) {
 	if _, ok := qs.assistantTextByID[messageID]; !ok {
 		qs.assistantTextOrder = append(qs.assistantTextOrder, messageID)
@@ -382,6 +435,19 @@ func (qs *qoderSession) setAssistantTextLocked(messageID, text string) {
 		}
 	}
 	qs.assistantTextByID[messageID] = text
+}
+
+func (qs *qoderSession) setThinkingTextLocked(messageID, text string) {
+	if _, ok := qs.thinkingTextByID[messageID]; !ok {
+		qs.thinkingTextOrder = append(qs.thinkingTextOrder, messageID)
+		if len(qs.thinkingTextOrder) > maxAssistantTextCacheEntries {
+			evictID := qs.thinkingTextOrder[0]
+			copy(qs.thinkingTextOrder, qs.thinkingTextOrder[1:])
+			qs.thinkingTextOrder = qs.thinkingTextOrder[:len(qs.thinkingTextOrder)-1]
+			delete(qs.thinkingTextByID, evictID)
+		}
+	}
+	qs.thinkingTextByID[messageID] = text
 }
 
 func (qs *qoderSession) handleResult(ev *streamEvent) {

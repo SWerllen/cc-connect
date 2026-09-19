@@ -284,6 +284,8 @@ func (s *qoderPersistentSession) ResetConversation(ctx context.Context) error {
 	s.base.textMu.Lock()
 	s.base.assistantTextByID = make(map[string]string)
 	s.base.assistantTextOrder = nil
+	s.base.thinkingTextByID = make(map[string]string)
+	s.base.thinkingTextOrder = nil
 	s.base.textMu.Unlock()
 	s.resetMu.Lock()
 	if s.lastUserMessageID == userMessageID {

@@ -494,6 +494,7 @@ func TestOpenAIGateway_RejectsUnsupportedReasoningEffort(t *testing.T) {
 
 func TestOpenAIGateway_StreamingChatCompletion(t *testing.T) {
 	agent := &gatewayTestAgent{events: []Event{
+		{Type: EventThinking, Content: "checking constraints"},
 		{Type: EventText, Content: "first"},
 		{Type: EventText, Content: " second"},
 		{Type: EventResult, Done: true, InputTokens: 3, OutputTokens: 2},
@@ -504,7 +505,7 @@ func TestOpenAIGateway_StreamingChatCompletion(t *testing.T) {
 		"reasoning_effort":"high",
 		"messages":[{"role":"user","content":"stream it"}],
 		"stream":true,
-		"stream_options":{"include_usage":true}
+		"stream_options":{"include_usage":true,"include_reasoning":true}
 	}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
 	rec := httptest.NewRecorder()
@@ -516,13 +517,36 @@ func TestOpenAIGateway_StreamingChatCompletion(t *testing.T) {
 		t.Fatalf("content-type = %q, want text/event-stream", got)
 	}
 	stream := rec.Body.String()
-	for _, want := range []string{`"role":"assistant"`, `"content":"first"`, `"content":" second"`, `"reasoning_effort":"high"`, `"finish_reason":"stop"`, `"prompt_tokens":3`, "data: [DONE]"} {
+	for _, want := range []string{`"role":"assistant"`, `"reasoning_content":"checking constraints"`, `"content":"first"`, `"content":" second"`, `"reasoning_effort":"high"`, `"finish_reason":"stop"`, `"prompt_tokens":3`, "data: [DONE]"} {
 		if !strings.Contains(stream, want) {
 			t.Fatalf("stream missing %q: %s", want, stream)
 		}
 	}
 	if got := agent.lastSessionOptions(); got.Model != "gpt-stream" || got.ReasoningEffort != "high" {
 		t.Fatalf("stream session options = %+v", got)
+	}
+}
+
+func TestOpenAIGateway_StreamingReasoningRequiresExplicitOptIn(t *testing.T) {
+	agent := &gatewayTestAgent{events: []Event{
+		{Type: EventThinking, Content: "private progress"},
+		{Type: EventText, Content: "visible answer"},
+		{Type: EventResult, Done: true},
+	}, models: []ModelOption{{Name: "gpt-stream"}}}
+	gateway := newGatewayTestServer(agent, "")
+	body := `{"model":"gpt-stream","messages":[{"role":"user","content":"stream it"}],"stream":true}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	gateway.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	stream := rec.Body.String()
+	if strings.Contains(stream, "reasoning_content") || strings.Contains(stream, "private progress") {
+		t.Fatalf("reasoning leaked without include_reasoning opt-in: %s", stream)
+	}
+	if !strings.Contains(stream, `"content":"visible answer"`) {
+		t.Fatalf("answer content missing: %s", stream)
 	}
 }
 

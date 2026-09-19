@@ -602,9 +602,9 @@ func (g *OpenAIGateway) handleChatCompletions(w http.ResponseWriter, r *http.Req
 	}
 	var result openAICompletionResult
 	if persistentSession != nil {
-		result, err = runOpenAICompletionWithSession(ctx, persistentSession.session, prompt, nil)
+		result, err = runOpenAICompletionWithSession(ctx, persistentSession.session, prompt, nil, nil)
 	} else {
-		result, err = runOpenAICompletion(ctx, target.Engine, prompt, nil, sessionOpts)
+		result, err = runOpenAICompletion(ctx, target.Engine, prompt, nil, nil, sessionOpts)
 	}
 	if err != nil {
 		writeOpenAICompletionFailure(w, err)
@@ -676,12 +676,21 @@ func (g *OpenAIGateway) streamChatCompletion(ctx context.Context, w http.Respons
 			Choices: []openAIStreamChoice{{Index: 0, Delta: openAIStreamDelta{Content: text}}},
 		})
 	}
+	var onThinking func(string) error
+	if req.StreamOptions != nil && req.StreamOptions.IncludeReasoning {
+		onThinking = func(text string) error {
+			return writeOpenAIStreamChunk(w, flusher, openAIChatCompletionChunk{
+				ID: id, Object: "chat.completion.chunk", Created: created, Model: req.Model, ReasoningEffort: sessionOpts.ReasoningEffort, CCCapabilityMode: capabilityModeForOptions(sessionOpts),
+				Choices: []openAIStreamChoice{{Index: 0, Delta: openAIStreamDelta{ReasoningContent: text}}},
+			})
+		}
+	}
 	var result openAICompletionResult
 	var err error
 	if persistentSession != nil {
-		result, err = runOpenAICompletionWithSession(ctx, persistentSession.session, prompt, onText)
+		result, err = runOpenAICompletionWithSession(ctx, persistentSession.session, prompt, onText, onThinking)
 	} else {
-		result, err = runOpenAICompletion(ctx, engine, prompt, onText, sessionOpts)
+		result, err = runOpenAICompletion(ctx, engine, prompt, onText, onThinking, sessionOpts)
 	}
 	if err != nil {
 		_ = writeOpenAIStreamData(w, flusher, openAIErrorEnvelope{Error: openAIErrorBody{
@@ -737,7 +746,7 @@ func capabilityModeForOptions(opts AgentSessionOptions) string {
 	return ""
 }
 
-func runOpenAICompletion(ctx context.Context, engine *Engine, prompt string, onText func(string) error, sessionOpts AgentSessionOptions) (openAICompletionResult, error) {
+func runOpenAICompletion(ctx context.Context, engine *Engine, prompt string, onText, onThinking func(string) error, sessionOpts AgentSessionOptions) (openAICompletionResult, error) {
 	agent := engine.GetAgent()
 	if agent == nil {
 		return openAICompletionResult{}, fmt.Errorf("project %q has no agent", engine.ProjectName())
@@ -757,10 +766,10 @@ func runOpenAICompletion(ctx context.Context, engine *Engine, prompt string, onT
 		return openAICompletionResult{}, fmt.Errorf("start agent session: %w", err)
 	}
 	defer session.Close()
-	return runOpenAICompletionWithSession(ctx, session, prompt, onText)
+	return runOpenAICompletionWithSession(ctx, session, prompt, onText, onThinking)
 }
 
-func runOpenAICompletionWithSession(ctx context.Context, session AgentSession, prompt string, onText func(string) error) (openAICompletionResult, error) {
+func runOpenAICompletionWithSession(ctx context.Context, session AgentSession, prompt string, onText, onThinking func(string) error) (openAICompletionResult, error) {
 	if err := session.Send(prompt, "", nil, nil); err != nil {
 		return openAICompletionResult{}, fmt.Errorf("send prompt to agent: %w", err)
 	}
@@ -790,6 +799,13 @@ func runOpenAICompletionWithSession(ctx context.Context, session AgentSession, p
 					if err := onText(event.Content); err != nil {
 						return openAICompletionResult{}, err
 					}
+				}
+			case EventThinking:
+				if event.Content == "" || onThinking == nil {
+					continue
+				}
+				if err := onThinking(event.Content); err != nil {
+					return openAICompletionResult{}, err
 				}
 			case EventResult:
 				if text.Len() == 0 && event.Content != "" {
@@ -1631,7 +1647,8 @@ type openAIContentPart struct {
 }
 
 type openAIStreamOptions struct {
-	IncludeUsage bool `json:"include_usage,omitempty"`
+	IncludeUsage     bool `json:"include_usage,omitempty"`
+	IncludeReasoning bool `json:"include_reasoning,omitempty"`
 }
 
 type openAIChatCompletionResponse struct {
@@ -1680,8 +1697,9 @@ type openAIStreamChoice struct {
 }
 
 type openAIStreamDelta struct {
-	Role    string `json:"role,omitempty"`
-	Content string `json:"content,omitempty"`
+	Role             string `json:"role,omitempty"`
+	Content          string `json:"content,omitempty"`
+	ReasoningContent string `json:"reasoning_content,omitempty"`
 }
 
 type openAIUsage struct {
