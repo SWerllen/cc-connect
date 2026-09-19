@@ -3,11 +3,22 @@ package core
 import (
 	"fmt"
 	"log/slog"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 )
+
+const ConditionalProxyEnv = "CC_CONNECT_PROXY_IF_AVAILABLE"
+
+var conditionalProxyKeys = map[string]struct{}{
+	"HTTP_PROXY":  {},
+	"HTTPS_PROXY": {},
+	"ALL_PROXY":   {},
+	"NO_PROXY":    {},
+}
 
 // UnauthorizedAccessMessage is safe to show to an inbound sender when the
 // platform boundary rejects their identity. Keep it user-facing: do not mention
@@ -18,6 +29,21 @@ const UnauthorizedAccessMessage = "角色未授权，请联系管理员添加权
 // This prevents duplicate keys (e.g. two PATH entries) which cause the override
 // to be silently ignored on Linux (getenv returns the first match).
 func MergeEnv(base, extra []string) []string {
+	return mergeEnvWithConditionalProxy(base, extra, conditionalProxyAvailable)
+}
+
+func mergeEnvWithConditionalProxy(base, extra []string, proxyAvailable func(string) bool) []string {
+	conditionalProxy := envValue(extra, ConditionalProxyEnv)
+	if conditionalProxy == "" {
+		conditionalProxy = envValue(base, ConditionalProxyEnv)
+	}
+	base = filterEnv(base, func(key string) bool { return strings.EqualFold(key, ConditionalProxyEnv) })
+	extra = filterEnv(extra, func(key string) bool { return strings.EqualFold(key, ConditionalProxyEnv) })
+	if conditionalProxy != "" && !proxyAvailable(conditionalProxy) {
+		base = filterEnv(base, isProxyEnvKey)
+		extra = filterEnv(extra, isProxyEnvKey)
+	}
+
 	keys := make(map[string]bool, len(extra))
 	for _, e := range extra {
 		if k, _, ok := strings.Cut(e, "="); ok {
@@ -32,6 +58,83 @@ func MergeEnv(base, extra []string) []string {
 		merged = append(merged, e)
 	}
 	return append(merged, extra...)
+}
+
+func envValue(env []string, key string) string {
+	for i := len(env) - 1; i >= 0; i-- {
+		name, value, ok := strings.Cut(env[i], "=")
+		if ok && strings.EqualFold(name, key) {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func filterEnv(env []string, remove func(string) bool) []string {
+	filtered := make([]string, 0, len(env))
+	for _, entry := range env {
+		key, _, ok := strings.Cut(entry, "=")
+		if ok && remove(key) {
+			continue
+		}
+		filtered = append(filtered, entry)
+	}
+	return filtered
+}
+
+func isProxyEnvKey(key string) bool {
+	_, ok := conditionalProxyKeys[strings.ToUpper(strings.TrimSpace(key))]
+	return ok
+}
+
+func conditionalProxyAvailable(rawURL string) bool {
+	address, err := conditionalProxyAddress(rawURL)
+	if err != nil {
+		slog.Warn("conditional agent proxy is invalid; starting without proxy", "error", err)
+		return false
+	}
+	conn, err := net.DialTimeout("tcp", address, 300*time.Millisecond)
+	if err != nil {
+		slog.Info("conditional agent proxy is unavailable; starting without proxy", "address", address)
+		return false
+	}
+	_ = conn.Close()
+	return true
+}
+
+func conditionalProxyAddress(rawURL string) (string, error) {
+	rawURL = strings.TrimSpace(rawURL)
+	if rawURL == "" {
+		return "", fmt.Errorf("empty proxy address")
+	}
+	if !strings.Contains(rawURL, "://") {
+		if _, _, err := net.SplitHostPort(rawURL); err != nil {
+			return "", err
+		}
+		return rawURL, nil
+	}
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return "", err
+	}
+	host := parsed.Hostname()
+	port := parsed.Port()
+	if host == "" {
+		return "", fmt.Errorf("proxy host is empty")
+	}
+	if port == "" {
+		switch strings.ToLower(parsed.Scheme) {
+		case "http":
+			port = "80"
+		case "https":
+			port = "443"
+		case "socks5", "socks5h":
+			port = "1080"
+		default:
+			return "", fmt.Errorf("proxy URL has no port")
+		}
+	}
+	return net.JoinHostPort(host, port), nil
 }
 
 // InjectedAgentEnv returns the env vars cc-connect injects into a spawned

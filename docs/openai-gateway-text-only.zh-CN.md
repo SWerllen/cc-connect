@@ -20,6 +20,19 @@ qoder-cli = "沃伦工厂-Qoder"
 codex-cli = "沃伦工厂"
 ```
 
+如需让 Codex/Qoder 在本地代理存在时走代理、代理未启动时自动直连，可在各自项目的 Agent 环境中配置：
+
+```toml
+[projects.agent.options.env]
+CC_CONNECT_PROXY_IF_AVAILABLE = "http://127.0.0.1:38999"
+HTTP_PROXY = "http://127.0.0.1:38999"
+HTTPS_PROXY = "http://127.0.0.1:38999"
+ALL_PROXY = "http://127.0.0.1:38999"
+NO_PROXY = "127.0.0.1,localhost,::1"
+```
+
+cc-connect 每次启动 Agent 子进程前都会探测条件代理。端口可连接时保留代理变量；不可连接或地址无效时，从继承环境和项目环境中同时移除大小写形式的 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY`、`NO_PROXY`，再以直连方式启动。`CC_CONNECT_PROXY_IF_AVAILABLE` 仅供 cc-connect 判断，不会传给 Agent。已经运行的持久 Session 保持创建时的网络环境；代理状态变化后，新建 Session 即应用新的判断。
+
 网关会在运行时识别并公开具体能力：
 
 - Qoder 使用 `--tools ""`，每个网关会话均为 `zero_tools`。

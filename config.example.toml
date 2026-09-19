@@ -889,6 +889,14 @@ mode = "default" # "default" | "acceptEdits" (edit) | "plan" | "auto" | "bypassP
 # 这样不同项目可以使用不同的模型供应商，无需修改全局的 ~/.claude/settings.json。
 #
 # [projects.agent.options.env]
+# # Optional: only keep HTTP(S)/ALL_PROXY variables when this proxy endpoint
+# # accepts a TCP connection as each agent child process starts. If unavailable,
+# # cc-connect removes inherited and configured proxy variables for that child.
+# # 可选：每次启动 Agent 子进程时探测代理端口；不可达时移除代理变量并直连。
+# CC_CONNECT_PROXY_IF_AVAILABLE = "http://127.0.0.1:38999"
+# HTTP_PROXY = "http://127.0.0.1:38999"
+# HTTPS_PROXY = "http://127.0.0.1:38999"
+# NO_PROXY = "127.0.0.1,localhost,::1"
 # ANTHROPIC_BASE_URL = "https://api.kimi.com/coding"
 # ANTHROPIC_AUTH_TOKEN = "sk-kimi-xxx"
 # ANTHROPIC_MODEL = "K2.6"

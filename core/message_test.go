@@ -62,6 +62,78 @@ func TestInjectedAgentEnv(t *testing.T) {
 	}
 }
 
+func TestMergeEnvConditionalProxyAvailable(t *testing.T) {
+	base := []string{"PATH=base", "HTTP_PROXY=http://old:8080"}
+	extra := []string{
+		"PATH=extra",
+		ConditionalProxyEnv + "=http://127.0.0.1:38999",
+		"HTTP_PROXY=http://127.0.0.1:38999",
+		"https_proxy=http://127.0.0.1:38999",
+	}
+	got := mergeEnvWithConditionalProxy(base, extra, func(proxy string) bool {
+		return proxy == "http://127.0.0.1:38999"
+	})
+	joined := strings.Join(got, "\n")
+	if strings.Contains(joined, ConditionalProxyEnv+"=") {
+		t.Fatalf("reserved conditional proxy marker leaked to child env: %v", got)
+	}
+	for _, want := range []string{"PATH=extra", "HTTP_PROXY=http://127.0.0.1:38999", "https_proxy=http://127.0.0.1:38999"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("child env missing %q: %v", want, got)
+		}
+	}
+}
+
+func TestMergeEnvConditionalProxyUnavailableRemovesInheritedAndConfiguredProxy(t *testing.T) {
+	base := []string{
+		"PATH=base",
+		"HTTP_PROXY=http://inherited:8080",
+		"no_proxy=localhost",
+	}
+	extra := []string{
+		ConditionalProxyEnv + "=http://127.0.0.1:38999",
+		"HTTPS_PROXY=http://127.0.0.1:38999",
+		"all_proxy=http://127.0.0.1:38999",
+		"PROJECT_FLAG=kept",
+	}
+	got := mergeEnvWithConditionalProxy(base, extra, func(string) bool { return false })
+	for _, entry := range got {
+		key, _, _ := strings.Cut(entry, "=")
+		if isProxyEnvKey(key) || strings.EqualFold(key, ConditionalProxyEnv) {
+			t.Fatalf("proxy setting leaked into direct child env: %q in %v", entry, got)
+		}
+	}
+	joined := strings.Join(got, "\n")
+	for _, want := range []string{"PATH=base", "PROJECT_FLAG=kept"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("non-proxy setting %q was removed: %v", want, got)
+		}
+	}
+}
+
+func TestConditionalProxyAddress(t *testing.T) {
+	tests := map[string]string{
+		"http://127.0.0.1:38999": "127.0.0.1:38999",
+		"https://proxy.example":  "proxy.example:443",
+		"socks5://localhost":     "localhost:1080",
+		"127.0.0.1:1234":         "127.0.0.1:1234",
+	}
+	for input, want := range tests {
+		got, err := conditionalProxyAddress(input)
+		if err != nil {
+			t.Fatalf("conditionalProxyAddress(%q): %v", input, err)
+		}
+		if got != want {
+			t.Fatalf("conditionalProxyAddress(%q) = %q, want %q", input, got, want)
+		}
+	}
+	for _, invalid := range []string{"", "proxy-without-port", "ftp://proxy.example"} {
+		if _, err := conditionalProxyAddress(invalid); err == nil {
+			t.Fatalf("conditionalProxyAddress(%q) unexpectedly succeeded", invalid)
+		}
+	}
+}
+
 // TestSaveFilesToDisk_RejectsPathTraversal is a regression test for a real
 // path-traversal vulnerability in SaveFilesToDisk: the attachment FileName
 // (which comes from user-controlled IM/HTTP upload metadata) was passed
